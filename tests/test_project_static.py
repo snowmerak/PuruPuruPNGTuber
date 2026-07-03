@@ -1028,6 +1028,71 @@ class ProjectStaticTests(unittest.TestCase):
         update_drawn_body = self.js_function_body(app, "function buildDrawnAvatarSettingsPayloadForUpdate(")
         self.assertIn("frontHairShadowEnabled: false", update_drawn_body)
 
+    def test_drawing_avatar_flood_fill_guards_near_replacement_pixels(self) -> None:
+        cases = [
+            {
+                "relative": "app.js",
+                "fill_signature": "function drawingAvatarFloodFill(",
+                "replacement_name": "replacement",
+            },
+            {
+                "relative": "standalone_drawing_avatar_export/standalone-drawing-avatar.js",
+                "fill_signature": "function flood(",
+                "replacement_name": "rep",
+            },
+        ]
+        changed_increment_pattern = re.compile(r"(?:changed\s*\+=\s*1|changed\s*\+\+|\+\+changed)")
+
+        for case in cases:
+            relative = case["relative"]
+            source = self.read_text(relative)
+            fill_body = self.js_function_body(source, case["fill_signature"])
+            replacement_name = case["replacement_name"]
+            replacement_word = rf"\b{re.escape(replacement_name)}\b"
+
+            with self.subTest(relative=relative):
+                # Flood fill must remember visited pixels so near-replacement colors cannot loop or be counted twice.
+                self.assertRegex(fill_body, r"\bvisited\b\s*=\s*new\s+Uint8Array\s*\(", relative)
+                self.assertGreaterEqual(len(re.findall(r"\bvisited\s*\[", fill_body)), 2, relative)
+
+                # Near-transparent / feathered edge matching must be replacement-aware.
+                replacement_matcher = re.search(
+                    rf"function\s+\w*replacement\w*match(?:es)?\s*\([^)]*{replacement_word}[^)]*\)\s*"
+                    r"\{(?P<body>[^{}]*)\}",
+                    source,
+                    re.I | re.S,
+                )
+                self.assertIsNotNone(replacement_matcher, relative)
+                self.assertRegex(replacement_matcher.group("body"), replacement_word, relative)
+                self.assertRegex(replacement_matcher.group("body"), r"\b(?:alpha|a)\b", relative)
+                self.assertRegex(fill_body, rf"\b\w*(?:Match|Matches)\s*\([^)]*{replacement_word}", relative)
+
+                # Do not skip filling merely because the target is only approximately the chosen replacement.
+                pre_queue = re.split(r"\bconst\s+(?:queue|q)\b", fill_body, maxsplit=1)[0]
+                compact_pre_queue = re.sub(r"\s+", "", pre_queue)
+                self.assertNotIn("target.every", compact_pre_queue, relative)
+                self.assertNotRegex(
+                    compact_pre_queue,
+                    rf"target\[[0-3]\].*{re.escape(replacement_name)}\[[0-3]\].*returnfalse",
+                    relative,
+                )
+
+                # changed should count exact pixel writes, not every pixel that was reached by tolerance.
+                queue_split = re.split(r"\bconst\s+(?:queue|q)\b", fill_body, maxsplit=1)
+                self.assertEqual(len(queue_split), 2, relative)
+                fill_loop_body = queue_split[1]
+                changed_increments = list(changed_increment_pattern.finditer(fill_loop_body))
+                self.assertTrue(changed_increments, relative)
+                guarded_changed_pattern = re.compile(
+                    rf"if\s*\((?=[^;{{}}]*{replacement_word})"
+                    r"(?=[^;{}]*(?:[Cc]hange|[Ss]ame|[Ee]qual|={2,3}|!={1,2}|Math\.abs))"
+                    r"[^;{}]*\)\s*\{",
+                    re.S,
+                )
+                for increment in changed_increments:
+                    increment_context = fill_loop_body[max(0, increment.start() - 500):increment.start()]
+                    self.assertRegex(increment_context, guarded_changed_pattern, relative)
+
     def test_standalone_drawing_avatar_import_limits_and_url_cleanup_are_wired(self) -> None:
         standalone = self.read_text("standalone_drawing_avatar_export/standalone-drawing-avatar.js")
         self.assertIn("const MAX_PROJECT_LAYERS = FIXED.length + MAX_ITEMS", standalone)

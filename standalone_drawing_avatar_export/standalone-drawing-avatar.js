@@ -551,23 +551,47 @@
     return e.deltaY * unit;
   }
   function replacement() { const c = rgb(app.color); return [c.r, c.g, c.b, 255]; }
-  function match(data, off, target) {
+  function sameRgba(data, off, rgba) {
+    return data[off] === rgba[0] && data[off + 1] === rgba[1] &&
+      data[off + 2] === rgba[2] && data[off + 3] === rgba[3];
+  }
+  function alphaAwareRgbMatch(data, off, color, tolerance = TOL) {
+    const a = data[off + 3];
+    const colorTol = Math.min(48, tolerance + Math.round((255 - a) * .12));
+    return Math.abs(data[off] - color[0]) <= colorTol &&
+      Math.abs(data[off + 1] - color[1]) <= colorTol &&
+      Math.abs(data[off + 2] - color[2]) <= colorTol;
+  }
+  function replacementEdgeMatch(data, off, rep, tolerance = TOL) {
+    const a = data[off + 3];
+    if (a <= 0 || a >= 255 - tolerance) return false;
+    const colorTol = Math.min(48, tolerance + Math.round((255 - a) * .12));
+    return Math.abs(data[off] - rep[0]) <= colorTol &&
+      Math.abs(data[off + 1] - rep[1]) <= colorTol &&
+      Math.abs(data[off + 2] - rep[2]) <= colorTol;
+  }
+  function targetMatch(data, off, target) {
     if (target[3] <= TOL) return data[off + 3] <= TOL;
-    return Math.abs(data[off] - target[0]) <= TOL && Math.abs(data[off + 1] - target[1]) <= TOL &&
-      Math.abs(data[off + 2] - target[2]) <= TOL && Math.abs(data[off + 3] - target[3]) <= TOL;
+    return Math.abs(data[off + 3] - target[3]) <= TOL && alphaAwareRgbMatch(data, off, target);
   }
   function flood(l, p) {
     const x0 = Math.floor(clamp(p.x, 0, W - 1)), y0 = Math.floor(clamp(p.y, 0, H - 1));
     const img = l.ctx.getImageData(0, 0, W, H), data = img.data;
     const start = y0 * W + x0, off = start * 4;
     const target = [data[off], data[off + 1], data[off + 2], data[off + 3]], rep = replacement();
-    if (target.every((v, i) => Math.abs(v - rep[i]) <= TOL)) return false;
-    const q = new Int32Array(W * H); let h = 0, t = 0, changed = 0;
+    const q = new Int32Array(W * H), visited = new Uint8Array(W * H);
+    let h = 0, t = 0, changed = 0;
     const put = (idx) => {
+      if (visited[idx]) return;
+      visited[idx] = 1;
       const o = idx * 4;
-      if (!match(data, o, target)) return;
-      data[o] = rep[0]; data[o + 1] = rep[1]; data[o + 2] = rep[2]; data[o + 3] = rep[3];
-      q[t++] = idx; changed += 1;
+      const hitTarget = targetMatch(data, o, target);
+      if (!hitTarget && !replacementEdgeMatch(data, o, rep)) return;
+      if (!sameRgba(data, o, rep)) {
+        data[o] = rep[0]; data[o + 1] = rep[1]; data[o + 2] = rep[2]; data[o + 3] = rep[3];
+        changed += 1;
+      }
+      q[t++] = idx;
     };
     put(start);
     while (h < t) {
@@ -577,7 +601,7 @@
       if (idx >= W) put(idx - W);
       if (idx < W * (H - 1)) put(idx + W);
     }
-    l.ctx.putImageData(img, 0, 0);
+    if (changed > 0) l.ctx.putImageData(img, 0, 0);
     return changed > 0;
   }
   function softColor(a) {

@@ -5369,14 +5369,41 @@
     return [rgb.r, rgb.g, rgb.b, 255];
   }
 
-  function drawingAvatarPixelMatches(data, offset, target, tolerance = DRAWING_AVATAR_FILL_TOLERANCE) {
+  function drawingAvatarAlphaAwareRgbMatches(data, offset, color, tolerance = DRAWING_AVATAR_FILL_TOLERANCE) {
     const alpha = data[offset + 3];
-    if (target[3] <= tolerance) return alpha <= tolerance;
+    const rgbTolerance = Math.min(48, tolerance + Math.round((255 - alpha) * 0.12));
     return (
-      Math.abs(data[offset] - target[0]) <= tolerance &&
-      Math.abs(data[offset + 1] - target[1]) <= tolerance &&
-      Math.abs(data[offset + 2] - target[2]) <= tolerance &&
-      Math.abs(alpha - target[3]) <= tolerance
+      Math.abs(data[offset] - color[0]) <= rgbTolerance &&
+      Math.abs(data[offset + 1] - color[1]) <= rgbTolerance &&
+      Math.abs(data[offset + 2] - color[2]) <= rgbTolerance
+    );
+  }
+
+  function drawingAvatarReplacementFeatherMatches(data, offset, replacement, tolerance = DRAWING_AVATAR_FILL_TOLERANCE) {
+    const alpha = data[offset + 3];
+    if (!replacement || alpha <= 0 || alpha >= 255 - tolerance) return false;
+    return drawingAvatarAlphaAwareRgbMatches(data, offset, replacement, tolerance);
+  }
+
+  function drawingAvatarPixelMatches(data, offset, target, replacement, tolerance = DRAWING_AVATAR_FILL_TOLERANCE) {
+    const alpha = data[offset + 3];
+    if (target[3] <= tolerance) {
+      if (alpha <= tolerance) return true;
+    } else if (
+      Math.abs(alpha - target[3]) <= tolerance &&
+      drawingAvatarAlphaAwareRgbMatches(data, offset, target, tolerance)
+    ) {
+      return true;
+    }
+    return drawingAvatarReplacementFeatherMatches(data, offset, replacement, tolerance);
+  }
+
+  function drawingAvatarPixelWouldChange(data, offset, replacement) {
+    return (
+      data[offset] !== replacement[0] ||
+      data[offset + 1] !== replacement[1] ||
+      data[offset + 2] !== replacement[2] ||
+      data[offset + 3] !== replacement[3]
     );
   }
 
@@ -5384,6 +5411,7 @@
     if (!layer || !point) return false;
     const width = layer.canvas.width;
     const height = layer.canvas.height;
+    if (!width || !height) return false;
     const startX = Math.max(0, Math.min(width - 1, Math.floor(point.x)));
     const startY = Math.max(0, Math.min(height - 1, Math.floor(point.y)));
     const imageData = layer.ctx.getImageData(0, 0, width, height);
@@ -5397,28 +5425,25 @@
       data[startOffset + 3],
     ];
     const replacement = drawingAvatarReplacementRgba();
-    if (
-      Math.abs(target[0] - replacement[0]) <= DRAWING_AVATAR_FILL_TOLERANCE &&
-      Math.abs(target[1] - replacement[1]) <= DRAWING_AVATAR_FILL_TOLERANCE &&
-      Math.abs(target[2] - replacement[2]) <= DRAWING_AVATAR_FILL_TOLERANCE &&
-      Math.abs(target[3] - replacement[3]) <= DRAWING_AVATAR_FILL_TOLERANCE
-    ) {
-      return false;
-    }
 
     const queue = new Int32Array(width * height);
+    const visited = new Uint8Array(width * height);
     let head = 0;
     let tail = 0;
     let changed = 0;
 
     const fillPixel = (pixelIndex) => {
+      if (visited[pixelIndex]) return false;
+      visited[pixelIndex] = 1;
       const offset = pixelIndex * 4;
-      if (!drawingAvatarPixelMatches(data, offset, target)) return false;
-      data[offset] = replacement[0];
-      data[offset + 1] = replacement[1];
-      data[offset + 2] = replacement[2];
-      data[offset + 3] = replacement[3];
-      changed += 1;
+      if (!drawingAvatarPixelMatches(data, offset, target, replacement)) return false;
+      if (drawingAvatarPixelWouldChange(data, offset, replacement)) {
+        data[offset] = replacement[0];
+        data[offset + 1] = replacement[1];
+        data[offset + 2] = replacement[2];
+        data[offset + 3] = replacement[3];
+        changed += 1;
+      }
       queue[tail] = pixelIndex;
       tail += 1;
       return true;
@@ -5434,8 +5459,9 @@
       if (pixelIndex >= width) fillPixel(pixelIndex - width);
       if (pixelIndex < width * (height - 1)) fillPixel(pixelIndex + width);
     }
+    if (changed <= 0) return false;
     layer.ctx.putImageData(imageData, 0, 0);
-    return changed > 0;
+    return true;
   }
 
   function applyDrawingAvatarBrushStyle(layerCtx, width = drawingAvatarSession?.brushSize) {
